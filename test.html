@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LoRa APRS Path & Elevation Lookup</title>
+    <!-- Leaflet CSS without integrity attribute -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          crossorigin=""/>
+    <style>
+        /* Basic styling for the page */
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            height: 100vh;
+            font-family: Arial, sans-serif;
+            flex-direction: column;
+        }
+
+        /* Flexbox layout with map and info panel */
+        #mapContainer {
+            display: flex;
+            flex: 2;
+        }
+
+        #map {
+            flex: 2;
+        }
+
+        #info {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            border-left: 1px solid #ccc;
+            background-color: #f9f9f9;
+        }
+
+        /* Plot container */
+        #plotContainer {
+            width: 100%;
+            height: 300px;
+            margin-top: 20px;
+        }
+
+        /* Button styling */
+        .button {
+            margin: 10px 0;
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            border-radius: 5px;
+            margin-right: 10px; /* Add some space between buttons */
+        }
+
+        /* Change button appearance on hover */
+        .button:hover {
+            opacity: 0.8;
+        }
+
+        /* Container for manual coordinate inputs */
+        .manualInputContainer {
+            margin-top: 20px;
+        }
+
+        /* Styling for input fields */
+        .coordinate-input {
+            margin-bottom: 10px;
+        }
+
+        label {
+            display: inline-block;
+            width: 40px;
+        }
+
+        input[type="text"] {
+            width: 150px;
+            padding: 5px;
+            margin-right: 10px;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+        }
+
+        /* Styled text output for responses */
+        .output {
+            margin-top: 10px;
+            font-weight: bold;
+        }
+
+        /* Loading spinner styling */
+        #loading {
+            display: none;
+            font-style: italic;
+        }
+
+        /* Distance label styling */
+        .leaflet-distance-label {
+            background-color: white;
+            padding: 5px 5px;
+            min-width: 55px;
+            white-space: nowrap;
+            font-weight: bold;
+            border-radius: 5px;
+            box-shadow: 0px 0px 3px rgba(0,0,0,0.3);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Container for the map and info panel -->
+    <div id="mapContainer">
+        <!-- Map Container -->
+        <div id="map"></div>
+
+        <!-- Info Panel -->
+        <div id="info">
+            <button id="enableP2P" class="button">Enable P2P</button>
+
+            <!-- Manual Coordinate Inputs for Point 1 -->
+            <div id="manualInputContainer1" class="manualInputContainer">
+                <h3>Point 1:</h3>
+                <button id="myLocation1" class="button">My Location</button>
+                <div class="coordinate-input">
+                    <label for="latInput1">Lat:</label>
+                    <input type="text" id="latInput1" placeholder="Enter Latitude">
+                </div>
+                <div class="coordinate-input">
+                    <label for="lonInput1">Lon:</label>
+                    <input type="text" id="lonInput1" placeholder="Enter Longitude">
+                </div>
+                <button id="submitCoordinates1" class="button">Submit</button>
+
+                <!-- Display parsed country and elevation information for Point 1 -->
+                <div id="response1" class="output">No data yet.</div>
+                <div id="elevationInfo1" class="output">No data yet.</div>
+            </div>
+
+            <!-- Manual Coordinate Inputs for Point 2 (Hidden by default) -->
+            <div id="manualInputContainer2" class="manualInputContainer" style="display: none;">
+                <h3>Point 2:</h3>
+                <button id="myLocation2" class="button">My Location</button>
+                <div class="coordinate-input">
+                    <label for="latInput2">Lat:</label>
+                    <input type="text" id="latInput2" placeholder="Enter Latitude">
+                </div>
+                <div class="coordinate-input">
+                    <label for="lonInput2">Lon:</label>
+                    <input type="text" id="lonInput2" placeholder="Enter Longitude">
+                </div>
+                <button id="submitCoordinates2" class="button">Submit</button>
+
+                <!-- Display parsed country and elevation information for Point 2 -->
+                <div id="response2" class="output" style="display: none;">No data yet.</div>
+                <div id="elevationInfo2" class="output" style="display: none;">No data yet.</div>
+            </div>
+
+            <!-- Loading Indicator -->
+            <div id="loading">Loading...</div>
+
+            <!-- Elevation plot will appear here -->
+            <div id="plotContainer" style="display: none;">
+                <canvas id="elevationChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS without integrity attribute -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            crossorigin="true"></script>
+    <!-- Chart.js for elevation plot -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <script>
+        // Initialize variables
+        const map = L.map('map').setView([20, 0], 2);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        let marker1, marker2, polyline, distanceLabel;
+        let isP2PEnabled = false;
+        let point1 = null;
+        let point2 = null;
+        let chartInstance = null;  // Track the chart instance to destroy it before re-creating.
+
+        // Add an event listener for the 'Enable P2P' button
+        document.getElementById('enableP2P').addEventListener('click', () => {
+            isP2PEnabled = !isP2PEnabled;
+            if (isP2PEnabled) {
+                document.getElementById('enableP2P').textContent = 'Disable P2P';
+                document.getElementById('enableP2P').style.backgroundColor = 'green'; // Change to green when enabled
+                document.getElementById('manualInputContainer2').style.display = 'block'; // Show manual inputs for Point 2
+                document.getElementById('response2').style.display = 'block';
+                document.getElementById('elevationInfo2').style.display = 'block';
+            } else {
+                document.getElementById('enableP2P').textContent = 'Enable P2P';
+                document.getElementById('enableP2P').style.backgroundColor = '#007bff'; // Back to blue when disabled
+                resetP2P();
+                document.getElementById('manualInputContainer2').style.display = 'none'; // Hide manual inputs for Point 2
+                document.getElementById('response2').style.display = 'none';
+                document.getElementById('elevationInfo2').style.display = 'none';
+            }
+        });
+
+        // Reset markers, polyline, and responses when P2P mode is disabled or reset
+        function resetP2P() {
+            if (marker1) map.removeLayer(marker1);
+            if (marker2) map.removeLayer(marker2);
+            if (polyline) map.removeLayer(polyline);
+            if (distanceLabel) map.removeLayer(distanceLabel);
+            point1 = null;
+            point2 = null;
+            
+            // Clear the Point 1 info
+            document.getElementById('response1').textContent = 'No data yet.';
+            document.getElementById('elevationInfo1').textContent = 'No data yet.';
+            document.getElementById('latInput1').value = '';
+            document.getElementById('lonInput1').value = '';
+            
+            // Clear the Point 2 info
+            document.getElementById('response2').textContent = 'No data yet.';
+            document.getElementById('elevationInfo2').textContent = 'No data yet.';
+            document.getElementById('latInput2').value = '';
+            document.getElementById('lonInput2').value = '';
+            
+            document.getElementById('plotContainer').style.display = 'none'; // Hide the plot
+
+            // Destroy the chart if it exists
+            if (chartInstance) {
+                chartInstance.destroy();
+                chartInstance = null;
+            }
+        }
+
+        // Handle map clicks
+        map.on('click', async function(e) {
+            const lat = e.latlng.lat;
+            const lon = e.latlng.lng;
+
+            // If P2P is enabled, allow two points to be selected, otherwise allow one point
+            if (isP2PEnabled) {
+                if (!point1) {
+                    point1 = { lat, lon };
+                    marker1 = L.marker([lat, lon]).addTo(map)
+                        .bindPopup(`Point 1: Latitude: ${lat.toFixed(4)}, Longitude: ${lon.toFixed(4)}`)
+                        .openPopup();
+
+                    fetchCountryAndElevationData(lat, lon, 'response1', 'elevationInfo1');
+
+                    // Auto-fill Point 1 coordinates
+                    document.getElementById('latInput1').value = lat.toFixed(6);
+                    document.getElementById('lonInput1').value = lon.toFixed(6);
+                } else if (!point2) {
+                    point2 = { lat, lon };
+                    marker2 = L.marker([lat, lon]).addTo(map)
+                        .bindPopup(`Point 2: Latitude: ${lat.toFixed(4)}, Longitude: ${lon.toFixed(4)}`)
+                        .openPopup();
+
+                    fetchCountryAndElevationData(lat, lon, 'response2', 'elevationInfo2');
+
+                    // Auto-fill Point 2 coordinates
+                    document.getElementById('latInput2').value = lat.toFixed(6);
+                    document.getElementById('lonInput2').value = lon.toFixed(6);
+
+                    // Draw a polyline between the two points
+                    polyline = L.polyline([point1, point2], { color: 'blue' }).addTo(map);
+
+                    // Show the distance between the points above the polyline in kilometers
+                    const distance = (map.distance([point1.lat, point1.lon], [point2.lat, point2.lon]) / 1000).toFixed(2);
+                    const midPoint = [(point1.lat + point2.lat) / 2, (point1.lon + point2.lon) / 2];
+                    distanceLabel = L.marker(midPoint, {
+                        icon: L.divIcon({
+                            className: 'leaflet-distance-label',
+                            html: `${distance} km`
+                        })
+                    }).addTo(map);
+
+                    // Fetch elevation data for the interpolated points and plot the elevation profile
+                    await fetchElevationProfile();
+                } else {
+                    // Reset points and allow selection of two new points
+                    resetP2P();
+                }
+            } else {
+                // If P2P is not enabled, allow one point to be selected and display data
+                resetP2P();
+                point1 = { lat, lon };
+                marker1 = L.marker([lat, lon]).addTo(map)
+                    .bindPopup(`Latitude: ${lat.toFixed(4)}, Longitude: ${lon.toFixed(4)}`)
+                    .openPopup();
+
+                fetchCountryAndElevationData(lat, lon, 'response1', 'elevationInfo1');
+
+                // Auto-fill Point 1 coordinates
+                document.getElementById('latInput1').value = lat.toFixed(6);
+                document.getElementById('lonInput1').value = lon.toFixed(6);
+            }
+        });
+
+        // Fetch country and elevation data for a specific point
+        async function fetchCountryAndElevationData(lat, lon, countryResponseElementId, elevationResponseElementId) {
+            document.getElementById('loading').style.display = 'block';
+
+            try {
+                // Fetch country data
+                const countryUrl = `http://127.0.0.1:8000/api/country`;
+                const countryResponse = await fetch(countryUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ lat, lon })
+                });
+
+                if (!countryResponse.ok) {
+                    throw new Error('Failed to fetch country data.');
+                }
+
+                const countryData = await countryResponse.json();
+
+                // Parse and display country data
+                document.getElementById(countryResponseElementId).innerHTML = `Country: ${countryData.country_name}<br>Closest Town: ${countryData.closest_town}`;
+
+                // Fetch elevation data
+                const elevationUrl = `/api/elevation`;
+                const elevationResponse = await fetch(elevationUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        locations: [{ latitude: lat, longitude: lon }]
+                    })
+                });
+
+                if (!elevationResponse.ok) {
+                    throw new Error('Failed to fetch elevation data.');
+                }
+
+                const elevationData = await elevationResponse.json();
+
+                // Parse and display elevation data
+                document.getElementById(elevationResponseElementId).textContent = `Elevation: ${elevationData.results[0].elevation} m`;
+            } catch (error) {
+                alert(error.message);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+
+        // Function to fetch elevation profile data and create the plot
+        async function fetchElevationProfile() {
+            const numPoints = 100; // Number of interpolated points
+
+            // Generate lat/lng points between point1 and point2
+            const latDiff = (point2.lat - point1.lat) / numPoints;
+            const lonDiff = (point2.lon - point1.lon) / numPoints;
+            const locations = [];
+            for (let i = 0; i <= numPoints; i++) {
+                locations.push({
+                    latitude: point1.lat + latDiff * i,
+                    longitude: point1.lon + lonDiff * i
+                });
+            }
+
+            try {
+                // Fetch elevation data for the interpolated points (replace with your elevation API)
+                const elevationUrl = `/api/elevation`;
+                const elevationResponse = await fetch(elevationUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ locations })
+                });
+
+                if (!elevationResponse.ok) {
+                    throw new Error('Failed to fetch elevation profile data.');
+                }
+
+                const elevationData = await elevationResponse.json();
+
+                // Extract elevation values and create the elevation plot
+                const elevations = elevationData.results.map(result => result.elevation);
+                createElevationPlot(elevations);
+            } catch (error) {
+                alert(error.message);
+            }
+        }
+
+        // Function to create the elevation plot using Chart.js
+        function createElevationPlot(elevations) {
+            document.getElementById('plotContainer').style.display = 'block'; // Show the plot container
+
+            // Destroy the existing chart if it exists
+            if (chartInstance) {
+                chartInstance.destroy();
+            }
+
+            const ctx = document.getElementById('elevationChart').getContext('2d');
+            chartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: elevations.map((_, index) => index + 1), // Numeric labels for points
+                    datasets: [{
+                        label: 'Elevation Profile',
+                        data: elevations,
+                        borderColor: 'rgba(75, 192, 192, 1)',
+                        fill: false
+                    }]
+                },
+                options: {
+                    scales: {
+                        x: {
+                            display: false // Hide x-axis labels
+                        },
+                        y: {
+                            title: { display: true, text: 'Elevation (m)' }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Add event listener for 'My Location' button (Point 1)
+        document.getElementById('myLocation1').addEventListener('click', () => {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(async (position) => {
+                    const lat = position.coords.latitude;
+                    const lon = position.coords.longitude;
+
+                    // Set Point 1 to the user's location
+                    if (marker1) map.removeLayer(marker1); // Remove existing marker1 if it exists
+                    point1 = { lat, lon };
+                    marker1 = L.marker([lat, lon]).addTo(map)
+                        .bindPopup(`Your Location: Latitude: ${lat.toFixed(4)}, Longitude: ${lon.toFixed(4)}`)
+                        .openPopup();
+
+                    // Fetch and display country and elevation data for the user's location
+                    fetchCountryAndElevationData(lat, lon, 'response1', 'elevationInfo1');
+
+                    // Auto-fill Point 1 coordinates
+                    document.getElementById('latInput1').value = lat.toFixed(6);
+                    document.getElementById('lonInput1').value = lon.toFixed(6);
+
+                    // If P2P is enabled and point2 exists, update the polyline and distance
+                    if (isP2PEnabled && point2) {
+                        // Update polyline
+                        if (polyline) {
+                            map.removeLayer(polyline);
+                        }
+                        polyline = L.polyline([point1, point2], { color: 'blue' }).addTo(map);
+
+                        // Update distance label
+                        if (distanceLabel) {
+                            map.removeLayer(distanceLabel);
+                        }
+                        const distance = (map.distance([point1.lat, point1.lon], [point2.lat, point2.lon]) / 1000).toFixed(2);
+                        const midPoint = [(point1.lat + point2.lat) / 2, (point1.lon + point2.lon) / 2];
+                        distanceLabel = L.marker(midPoint, {
+                            icon: L.divIcon({
+                                className: 'leaflet-distance-label',
+                                html: `${distance} km`
+                            })
+                        }).addTo(map);
+
+                        // Fetch elevation profile for updated points
+                        await fetchElevationProfile();
+                    }
+
+                    // Adjust the map view to center on the user's location
+                    map.setView([lat, lon], 12);
+                }, (error) => {
+                    switch(error.code) {
+                        case error.PERMISSION_DENIED:
+                            alert("User denied the request for Geolocation.");
+                            break;
+                        case error.POSITION_UNAVAILABLE:
+                            alert("Location information is unavailable.");
+                            break;
+                        case error.TIMEOUT:
+                            alert("The request to get user location timed out.");
+                            break;
+                        default:
+                            alert("An unknown error occurred.");
+                            break;
+                    }
+                });
+            } else {
+                alert("Geolocation is not supported by this browser.");
+            }
+        });
+
+        // Add event listener for 'My Location' button (Point 2)
+        document.getElementById('myLocation2').addEventListener('click', () => {
+            if (!isP2PEnabled) {
+                alert("Enable P2P mode to set Point 2.");
+                return;
+            }
+
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(async (position) => {
+                    const lat = position.coords.latitude;
+                    const lon = position.coords.longitude;
+
+                    // Set Point 2 to the user's location
+                    if (marker2) map.removeLayer(marker2); // Remove existing marker2 if it exists
+                    point2 = { lat, lon };
+                    marker2 = L.marker([lat, lon]).addTo(map)
+                        .bindPopup(`Point 2: Your Location: Latitude: ${lat.toFixed(4)}, Longitude: ${lon.toFixed(4)}`)
+                        .openPopup();
+
+                    // Fetch and display country and elevation data for Point 2
+                    fetchCountryAndElevationData(lat, lon, 'response2', 'elevationInfo2');
+
+                    // Auto-fill Point 2 coordinates
+                    document.getElementById('latInput2').value = lat.toFixed(6);
+                    document.getElementById('lonInput2').value = lon.toFixed(6);
+
+                    // Draw a polyline between the two points
+                    if (polyline) {
+                        map.removeLayer(polyline);
+                    }
+                    polyline = L.polyline([point1, point2], { color: 'blue' }).addTo(map);
+
+                    // Show the distance between the points above the polyline in kilometers
+                    if (distanceLabel) {
+                        map.removeLayer(distanceLabel);
+                    }
+                    const distance = (map.distance([point1.lat, point1.lon], [point2.lat, point2.lon]) / 1000).toFixed(2);
+                    const midPoint = [(point1.lat + point2.lat) / 2, (point1.lon + point2.lon) / 2];
+                    distanceLabel = L.marker(midPoint, {
+                        icon: L.divIcon({
+                            className: 'leaflet-distance-label',
+                            html: `${distance} km`
+                        })
+                    }).addTo(map);
+
+                    // Fetch elevation profile for the updated points
+                    await fetchElevationProfile();
+
+                    // Adjust the map view to include both points
+                    const bounds = L.latLngBounds([point1, point2]);
+                    map.fitBounds(bounds, { padding: [50, 50] });
+                }, (error) => {
+                    switch(error.code) {
+                        case error.PERMISSION_DENIED:
+                            alert("User denied the request for Geolocation.");
+                            break;
+                        case error.POSITION_UNAVAILABLE:
+                            alert("Location information is unavailable.");
+                            break;
+                        case error.TIMEOUT:
+                            alert("The request to get user location timed out.");
+                            break;
+                        default:
+                            alert("An unknown error occurred.");
+                            break;
+                    }
+                });
+            } else {
+                alert("Geolocation is not supported by this browser.");
+            }
+        });
+
+        // Add event listener for 'Submit Coordinates' button (Point 1)
+        document.getElementById('submitCoordinates1').addEventListener('click', () => {
+            const latInput = document.getElementById('latInput1').value.trim();
+            const lonInput = document.getElementById('lonInput1').value.trim();
+
+            // Validate the inputs
+            const lat = parseFloat(latInput);
+            const lon = parseFloat(lonInput);
+
+            if (isNaN(lat) || isNaN(lon)) {
+                alert('Please enter valid numeric values for latitude and longitude for Point 1.');
+                return;
+            }
+
+            if (lat < -90 || lat > 90) {
+                alert('Latitude must be between -90 and 90 degrees.');
+                return;
+            }
+
+            if (lon < -180 || lon > 180) {
+                alert('Longitude must be between -180 and 180 degrees.');
+                return;
+            }
+
+            // If P2P is enabled and point1 is already set, handle accordingly
+            if (isP2PEnabled && point1 && point2) {
+                // Update point1
+                point1 = { lat, lon };
+                if (marker1) {
+                    map.removeLayer(marker1);
+                }
+                marker1 = L.marker([lat, lon]).addTo(map)
+                    .bindPopup(`Point 1: Latitude: ${lat.toFixed(4)}, Longitude: ${lon.toFixed(4)}`)
+                    .openPopup();
+
+                // Fetch and display country and elevation data for Point 1
+                fetchCountryAndElevationData(lat, lon, 'response1', 'elevationInfo1');
+
+                // Update polyline and distance
+                if (polyline) {
+                    map.removeLayer(polyline);
+                }
+                polyline = L.polyline([point1, point2], { color: 'blue' }).addTo(map);
+
+                // Update distance label
+                if (distanceLabel) {
+                    map.removeLayer(distanceLabel);
+                }
+                const distance = (map.distance([point1.lat, point1.lon], [point2.lat, point2.lon]) / 1000).toFixed(2);
+                const midPoint = [(point1.lat + point2.lat) / 2, (point1.lon + point2.lon) / 2];
+                distanceLabel = L.marker(midPoint, {
+                    icon: L.divIcon({
+                        className: 'leaflet-distance-label',
+                        html: `${distance} km`
+                    })
+                }).addTo(map);
+
+                // Fetch elevation profile for updated points
+                fetchElevationProfile();
+            } else {
+                // If P2P is not enabled or only one point is set, handle accordingly
+                resetP2P();
+                point1 = { lat, lon };
+                marker1 = L.marker([lat, lon]).addTo(map)
+                    .bindPopup(`Point 1: Latitude: ${lat.toFixed(4)}, Longitude: ${lon.toFixed(4)}`)
+                    .openPopup();
+
+                // Center the map on the entered coordinates
+                map.setView([lat, lon], 12);
+
+                // Fetch and display country and elevation data for the entered coordinates
+                fetchCountryAndElevationData(lat, lon, 'response1', 'elevationInfo1');
+            }
+        });
+
+        // Add event listener for 'Submit Coordinates' button (Point 2)
+        document.getElementById('submitCoordinates2').addEventListener('click', () => {
+            if (!isP2PEnabled) {
+                alert("Enable P2P mode to set Point 2.");
+                return;
+            }
+
+            const latInput = document.getElementById('latInput2').value.trim();
+            const lonInput = document.getElementById('lonInput2').value.trim();
+
+            // Validate the inputs
+            const lat = parseFloat(latInput);
+            const lon = parseFloat(lonInput);
+
+            if (isNaN(lat) || isNaN(lon)) {
+                alert('Please enter valid numeric values for latitude and longitude for Point 2.');
+                return;
+            }
+
+            if (lat < -90 || lat > 90) {
+                alert('Latitude must be between -90 and 90 degrees.');
+                return;
+            }
+
+            if (lon < -180 || lon > 180) {
+                alert('Longitude must be between -180 and 180 degrees.');
+                return;
+            }
+
+            // Handle Point 2 submission
+            if (point1 && isP2PEnabled) {
+                point2 = { lat, lon };
+                if (marker2) {
+                    map.removeLayer(marker2);
+                }
+                marker2 = L.marker([lat, lon]).addTo(map)
+                    .bindPopup(`Point 2: Latitude: ${lat.toFixed(4)}, Longitude: ${lon.toFixed(4)}`)
+                    .openPopup();
+
+                // Fetch and display country and elevation data for Point 2
+                fetchCountryAndElevationData(lat, lon, 'response2', 'elevationInfo2');
+
+                // Draw a polyline between the two points
+                if (polyline) {
+                    map.removeLayer(polyline);
+                }
+                polyline = L.polyline([point1, point2], { color: 'blue' }).addTo(map);
+
+                // Show the distance between the points above the polyline in kilometers
+                if (distanceLabel) {
+                    map.removeLayer(distanceLabel);
+                }
+                const distance = (map.distance([point1.lat, point1.lon], [point2.lat, point2.lon]) / 1000).toFixed(2);
+                const midPoint = [(point1.lat + point2.lat) / 2, (point1.lon + point2.lon) / 2];
+                distanceLabel = L.marker(midPoint, {
+                    icon: L.divIcon({
+                        className: 'leaflet-distance-label',
+                        html: `${distance} km`
+                    })
+                }).addTo(map);
+
+                // Fetch elevation profile for the updated points
+                fetchElevationProfile();
+
+                // Adjust the map view to include both points
+                const bounds = L.latLngBounds([point1, point2]);
+                map.fitBounds(bounds, { padding: [50, 50] });
+            } else {
+                alert('Point 1 must be set before setting Point 2.');
+            }
+        });
+    </script>
+</body>
+</html>
+
